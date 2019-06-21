@@ -6,11 +6,13 @@ import (
 
 type (
 	// надо ли?
-	G         struct{}
-	Or        struct{}
-	Any       struct{}
-	Struct    struct{}
-	Interface struct{}
+	G            struct{}
+	Or           struct{}
+	Any          struct{}
+	Struct       struct{}
+	Interface    struct{}
+	AssignableTo struct{}
+	AssignableFrom struct{}
 
 	T  struct{}
 	U  struct{}
@@ -30,11 +32,13 @@ type (
 )
 
 var (
-	gType         = reflect.TypeOf(G{})
-	orType        = reflect.TypeOf(Or{})
-	anyType       = reflect.TypeOf(Any{})
-	structType    = reflect.TypeOf(Struct{})
-	interfaceType = reflect.TypeOf(Interface{})
+	gType            = reflect.TypeOf(G{})
+	orType           = reflect.TypeOf(Or{})
+	anyType          = reflect.TypeOf(Any{})
+	structType       = reflect.TypeOf(Struct{})
+	interfaceType    = reflect.TypeOf(Interface{})
+	assignableToType = reflect.TypeOf(AssignableTo{})
+	assignableFromType = reflect.TypeOf(AssignableFrom{})
 
 	tType  = reflect.TypeOf(T{})
 	uType  = reflect.TypeOf(U{})
@@ -56,7 +60,7 @@ var (
 func isMatcherType(t reflect.Type) (reflect.Type, bool) {
 	if t.Kind() == reflect.Map {
 		switch t.Key() {
-		case gType, orType, zeroOrOneType, zeroOrMoreType, oneOrMoreType:
+		case gType, orType, zeroOrOneType, zeroOrMoreType, oneOrMoreType, assignableToType, assignableFromType:
 			return t.Key(), true
 		}
 	}
@@ -69,24 +73,6 @@ func isMatcherType(t reflect.Type) (reflect.Type, bool) {
 	}
 
 	return nil, false
-}
-
-type placeholderBinding struct {
-	t   reflect.Type
-	val reflect.Type
-}
-
-type placeholderMap []placeholderBinding
-
-func (m *placeholderMap) put(t reflect.Type, val reflect.Type) bool {
-	for _, b := range *m {
-		if b.t == t {
-			return b.val == val
-		}
-	}
-
-	*m = append(*m, placeholderBinding{t: t, val: val})
-	return true
 }
 
 func getIn(t reflect.Type) []reflect.Type {
@@ -103,13 +89,4 @@ func getOut(t reflect.Type) []reflect.Type {
 		in[i] = t.Out(i)
 	}
 	return in
-}
-
-type matchContext struct {
-	capturedTypes placeholderMap
-}
-
-func (ctx matchContext) fork() *matchContext {
-	ctx.capturedTypes = append(placeholderMap(nil), ctx.capturedTypes...)
-	return &ctx
 }

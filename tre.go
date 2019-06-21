@@ -5,79 +5,92 @@ import (
 	"reflect"
 )
 
-var matchState = &state{matchFn: func(*matchContext, reflect.Type) (*matchContext, bool) {
-	return nil, false
+var matchState = &state{matchFn: func(Placeholders, reflect.Type) (Placeholders, bool) {
+	return noMatch()
 }}
 
 type state struct {
-	matchFn   func(*matchContext, reflect.Type) (*matchContext, bool)
+	matchFn   func(Placeholders, reflect.Type) (Placeholders, bool)
 	out, out1 *state
 }
 
 type stateItem struct {
-	s   *state
-	ctx *matchContext
+	*state
+	p Placeholders
 }
 
-type stateList struct {
-	s []stateItem
-}
+type stateList []stateItem
 
-func (l *stateList) addState(ctx *matchContext, s *state) {
+func (l *stateList) addState(s *state, p Placeholders) {
 	if s == nil {
 		return
 	}
 
-	for i, ss := range l.s {
-		if ss.s == s {
-			l.s[i].ctx = ctx
+	if s.matchFn == nil {
+		l.addState(s.out, p)
+		l.addState(s.out1, p)
+		return
+	}
+
+	si := stateItem{state: s, p: p}
+	for _, ss := range *l {
+		if ss == si {
 			return
 		}
 	}
 
-	if s.matchFn == nil {
-		l.addState(ctx.fork(), s.out)
-		l.addState(ctx.fork(), s.out1)
-	} else {
-		l.s = append(l.s, stateItem{s: s, ctx: ctx})
-	}
+	*l = append(*l, si)
 }
 
-func startList(ctx *matchContext, s *state) stateList {
+func startList(s *state, p Placeholders) stateList {
 	var l stateList
-	l.addState(ctx, s)
+	l.addState(s, p)
 	return l
 }
 
-func step(clist stateList, t reflect.Type, nlist *stateList) {
-	nlist.s = nil
-	for _, s := range clist.s {
-		mctx, ok := s.s.matchFn(s.ctx, t)
-		if ok {
-			nlist.addState(mctx, s.s.out)
-		}
-	}
-}
-
-func isMatch(l stateList) (*matchContext, bool) {
-	for _, s := range l.s {
-		if s.s == matchState {
-			return s.ctx, true
+func isMatch(l stateList) (Placeholders, bool) {
+	for _, s := range l {
+		if s.state == matchState {
+			return s.p, true
 		}
 	}
 
-	return nil, false
+	return noMatch()
 }
 
-func matchNFA(ctx *matchContext, typeList []reflect.Type, nfa *state) (*matchContext, bool) {
-	var clist, nlist stateList
-	clist = startList(ctx, nfa)
+func matchNFA(p Placeholders, typeList []reflect.Type, nfa *state) (Placeholders, bool) {
+	var nlist stateList
+	clist := startList(nfa, p)
 	for _, t := range typeList {
-		step(clist, t, &nlist)
+		for _, s := range clist {
+			if mp, ok := s.matchFn(s.p, t); ok {
+				//noinspection GoNilness
+				nlist.addState(s.out, mp)
+			}
+		}
+
 		clist, nlist = nlist, clist
+		nlist = nlist[:0]
 	}
 
 	return isMatch(clist)
+}
+
+func noMatch() (Placeholders, bool) {
+	return Placeholders{}, false
+}
+
+func compilePlaceholderState(key reflect.Type, pfFunc func(*Placeholders) *reflect.Type, nextState *state) *state {
+	return &state{
+		out: nextState,
+		matchFn: func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+			if !p.put(key, t, pfFunc(&p)) {
+				return noMatch()
+			}
+
+			return p, true
+		},
+	}
 }
 
 func compileMatchState(key, re reflect.Type, nextState *state) *state {
@@ -129,46 +142,81 @@ func compileMatchState(key, re reflect.Type, nextState *state) *state {
 	case anyType:
 		return &state{
 			out: nextState,
-			matchFn: func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
-				return ctx, true
+			matchFn: func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+				return p, true
 			},
 		}
 
 	case structType:
 		return &state{
 			out: nextState,
-			matchFn: func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
+			matchFn: func(p Placeholders, t reflect.Type) (Placeholders, bool) {
 				if t.Kind() != reflect.Struct {
-					return nil, false
+					return noMatch()
 				}
 
-				return ctx, true
+				return p, true
 			},
 		}
 
 	case interfaceType:
 		return &state{
 			out: nextState,
-			matchFn: func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
+			matchFn: func(p Placeholders, t reflect.Type) (Placeholders, bool) {
 				if t.Kind() != reflect.Interface {
-					return nil, false
+					return noMatch()
 				}
 
-				return ctx, true
+				return p, true
 			},
 		}
 
-	case tType, uType, vType, t1Type, t2Type, t3Type, t4Type, t5Type, t6Type, t7Type, t8Type:
+	case assignableToType:
 		return &state{
 			out: nextState,
-			matchFn: func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
-				if !ctx.capturedTypes.put(key, t) {
-					return nil, false
+			matchFn: func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+				if !t.AssignableTo(re.Elem()) {
+					return noMatch()
 				}
 
-				return ctx, true
+				return p, true
 			},
 		}
+
+	case assignableFromType:
+		return &state{
+			out: nextState,
+			matchFn: func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+				if !re.Elem().AssignableTo(t) {
+					return noMatch()
+				}
+
+				return p, true
+			},
+		}
+
+	case tType:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T }, nextState)
+	case uType:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.U }, nextState)
+	case vType:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.V }, nextState)
+	case t1Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T1 }, nextState)
+	case t2Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T2 }, nextState)
+	case t3Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T3 }, nextState)
+	case t4Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T4 }, nextState)
+	case t5Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T5 }, nextState)
+	case t6Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T6 }, nextState)
+	case t7Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T7 }, nextState)
+	case t8Type:
+		return compilePlaceholderState(key, func(p *Placeholders) *reflect.Type { return &p.T8 }, nextState)
 	}
 
 	panic(fmt.Sprintf("unexpected re: %s", re))
@@ -180,80 +228,79 @@ func compileState(reType reflect.Type, nextState *state) *state {
 	}
 
 	var s state
-	var matchFn func(*matchContext, reflect.Type) (*matchContext, bool)
+	var matchFn func(Placeholders, reflect.Type) (Placeholders, bool)
 	switch reType.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
 		reflect.Bool, reflect.String, reflect.Complex64, reflect.Complex128, reflect.Float32, reflect.Float64,
 		reflect.Struct, reflect.Interface:
 
-		matchFn = func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
+		matchFn = func(p Placeholders, t reflect.Type) (Placeholders, bool) {
 			if t != reType {
-				return nil, false
+				return noMatch()
 			}
 
-			return ctx, true
+			return p, true
 		}
 
 	case reflect.Slice, reflect.Array, reflect.Ptr:
 		elemNFA := compileNFA([]reflect.Type{reType.Elem()})
-		matchFn = func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
-			return matchNFA(ctx, []reflect.Type{t.Elem()}, elemNFA)
+		matchFn = func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+			return matchNFA(p, []reflect.Type{t.Elem()}, elemNFA)
 		}
 
 	case reflect.Map:
 		keyNFA := compileNFA([]reflect.Type{reType.Key()})
 		elemNFA := compileNFA([]reflect.Type{reType.Elem()})
-		matchFn = func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
-			mctx1, ok1 := matchNFA(ctx, []reflect.Type{t.Key()}, keyNFA)
+		matchFn = func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+			mp1, ok1 := matchNFA(p, []reflect.Type{t.Key()}, keyNFA)
 			if !ok1 {
-				return nil, false
+				return noMatch()
 			}
 
-			mctx2, ok2 := matchNFA(mctx1, []reflect.Type{t.Elem()}, elemNFA)
+			mp2, ok2 := matchNFA(mp1, []reflect.Type{t.Elem()}, elemNFA)
 			if !ok2 {
-				return nil, false
+				return noMatch()
 			}
 
-			return mctx2, true
+			return mp2, true
 		}
 
 	case reflect.Func:
 		inNFA := compileNFA(getIn(reType))
 		outNFA := compileNFA(getOut(reType))
-		matchFn = func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
-			mctx1, ok1 := matchNFA(ctx, getIn(t), inNFA)
+		matchFn = func(p Placeholders, t reflect.Type) (Placeholders, bool) {
+			mp1, ok1 := matchNFA(p, getIn(t), inNFA)
 			if !ok1 {
-				return nil, false
+				return noMatch()
 			}
 
-			mctx2, ok2 := matchNFA(mctx1, getOut(t), outNFA)
+			mp2, ok2 := matchNFA(mp1, getOut(t), outNFA)
 			if !ok2 {
-				return nil, false
+				return noMatch()
 			}
 
-			return mctx2, true
+			return mp2, true
 		}
 
 	case reflect.Chan:
 		elemNFA := compileNFA([]reflect.Type{reType.Elem()})
-		matchFn = func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
+		matchFn = func(p Placeholders, t reflect.Type) (Placeholders, bool) {
 			if t.ChanDir() != reType.ChanDir() {
-				return nil, false
+				return noMatch()
 			}
 
-			mctx, ok := matchNFA(ctx, []reflect.Type{t.Elem()}, elemNFA)
-			return mctx, ok
+			return matchNFA(p, []reflect.Type{t.Elem()}, elemNFA)
 		}
 	}
 
 	s.out = nextState
-	s.matchFn = func(ctx *matchContext, t reflect.Type) (*matchContext, bool) {
+	s.matchFn = func(p Placeholders, t reflect.Type) (Placeholders, bool) {
 		if t.Kind() != reType.Kind() {
-			return nil, false
+			return noMatch()
 		}
 
-		return matchFn(ctx, t)
+		return matchFn(p, t)
 	}
 
 	return &s
@@ -271,44 +318,16 @@ type Placeholders struct {
 	T, U, V, T1, T2, T3, T4, T5, T6, T7, T8 reflect.Type
 }
 
+func (p *Placeholders) put(t reflect.Type, val reflect.Type, pt *reflect.Type) bool {
+	if *pt != nil {
+		return *pt == val
+	}
+
+	*pt = val
+	return true
+}
+
 func MatchType(t reflect.Type, re interface{}) (Placeholders, bool) {
 	s := compileNFA([]reflect.Type{reflect.TypeOf(re)})
-	ctx, ok := matchNFA(&matchContext{}, []reflect.Type{t}, s)
-	if !ok {
-		return Placeholders{}, false
-	}
-
-	if len(ctx.capturedTypes) == 0 {
-		return Placeholders{}, true
-	}
-
-	p := Placeholders{}
-	for _, ct := range ctx.capturedTypes {
-		switch ct.t {
-		case tType:
-			p.T = ct.val
-		case uType:
-			p.U = ct.val
-		case vType:
-			p.V = ct.val
-		case t1Type:
-			p.T1 = ct.val
-		case t2Type:
-			p.T2 = ct.val
-		case t3Type:
-			p.T3 = ct.val
-		case t4Type:
-			p.T4 = ct.val
-		case t5Type:
-			p.T5 = ct.val
-		case t6Type:
-			p.T6 = ct.val
-		case t7Type:
-			p.T7 = ct.val
-		case t8Type:
-			p.T8 = ct.val
-		}
-	}
-
-	return p, true
+	return matchNFA(Placeholders{}, []reflect.Type{t}, s)
 }
